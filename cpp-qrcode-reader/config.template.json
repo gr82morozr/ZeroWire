@@ -1,0 +1,8 @@
+{
+  "camera_index": 1,
+  "incoming_dir": "qrcode-reader.incoming",
+  "esp32_host": "192.168.1.136",
+  "esp32_port": 9000,
+  "connect_timeout_seconds": 2.0,
+  "unique": false
+}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import json
 import multiprocessing as mp
 import queue
 import re
@@ -20,8 +21,9 @@ START_MARKER_RE = re.compile(r"\$\$\$LOAD-(.*?)%%%", re.DOTALL)
 END_MARKER_PREFIX = "@@@SAVE-"
 END_MARKER_SUFFIX = "###"
 END_MARKER_RE = re.compile(r"@@@SAVE-(.*?)###", re.DOTALL)
-ZIP_TEMP_DIR = Path(r"D:\Temp\InpueBox")
-INBOUND_DIR = Path("Z:/Tools/_inbound_")
+CONFIG_PATH = Path(__file__).with_name("config.json")
+DEFAULT_TEMP_DIR = Path(r"D:\Temp\InpueBox")
+DEFAULT_INBOUND_DIR = Path("Z:/Tools/_inbound_")
 POLL_INTERVAL_MS = 60
 MAX_STATUS_LINES = 10
 WINDOW_WIDTH = 760
@@ -32,6 +34,27 @@ STATUS_HEIGHT = 4
 PAYLOAD_SANITIZE_RE = re.compile(r"\s+")
 BASE64_BODY_RE = re.compile(r"[^A-Za-z0-9+/=]")
 VISIBLE_TEXT_LIMIT = 200
+
+
+def load_path_config() -> tuple[Path, Path]:
+    temp_dir = DEFAULT_TEMP_DIR
+    inbound_dir = DEFAULT_INBOUND_DIR
+    try:
+        with CONFIG_PATH.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if isinstance(raw, dict):
+            temp_value = str(raw.get("TEMP_FOLDER", "")).strip()
+            inbound_value = str(raw.get("INBOUND_FOLDER", "")).strip()
+            if temp_value:
+                temp_dir = Path(temp_value)
+            if inbound_value:
+                inbound_dir = Path(inbound_value)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+        pass
+    return temp_dir, inbound_dir
+
+
+ZIP_TEMP_DIR, INBOUND_DIR = load_path_config()
 
 
 def decode_marker_path(encoded_path: str) -> str:
@@ -273,6 +296,7 @@ class InputBoxApp:
         self.status_area.configure(state="normal")
         self.status_area.delete("1.0", "end")
         self.status_area.insert("1.0", "\n".join(self.status_lines))
+        self.status_area.see("end")
         self.status_area.configure(state="disabled")
 
     def update_progress(self) -> None:

@@ -9,8 +9,8 @@ import hashlib
 import io
 import json
 import os
+import secrets
 import sys
-import uuid
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -61,15 +61,18 @@ FORMAT_INFO_BITS_L = [
 ]
 
 MAX_MODULES = MAX_VERSION * 4 + 17
-MAX_WINDOW_HEIGHT = 600
-MAX_WINDOW_WIDTH = 600
+MAX_WINDOW_HEIGHT = 800
+MAX_WINDOW_WIDTH = 800
+DEFAULT_DATA_MAX_VERSION = min(MAX_VERSION, 14)
 CANVAS_MODULE_SIZE = max(4, min(12, 860 // MAX_MODULES))
 CANVAS_MARGIN = 4 * CANVAS_MODULE_SIZE
-CANVAS_STATUS_HEIGHT = 28
+CANVAS_STATUS_HEIGHT = 72
 CANVAS_SIZE = MAX_MODULES * CANVAS_MODULE_SIZE + CANVAS_MARGIN * 2
 QR_FRAME_COLOR = "#00E5FF"
-QR_FRAME_WIDTH = max(14, CANVAS_MODULE_SIZE * 2)
-QR_CORNER_MARKER_SIZE = max(28, CANVAS_MODULE_SIZE * 5)
+QR_FRAME_WIDTH = max(20, CANVAS_MODULE_SIZE * 3)
+QR_CORNER_MARKER_SIZE = max(24, CANVAS_MODULE_SIZE * 4)
+QR_QUIET_ZONE_MODULES = 4
+QR_FRAME_CLEARANCE_MODULES = 2
 PROTOCOL_MAGIC = "AIRQR1"
 PROTOCOL_VERSION = 1
 
@@ -85,6 +88,19 @@ class PageSpec:
     payload: bytes
     version: int
     label: str
+    matrix: Optional["QRMatrix"] = None
+    rendered_console: Optional[str] = None
+
+
+@dataclass
+class PreparedFile:
+    source: Path
+    relative_path: str
+    file_id: str
+    file_index: int
+    zip_bytes: bytes
+    payload_bytes: bytes
+    data_chunks: list[str]
 
 
 def center_window(window: "tk.Tk", width: int, height: int) -> None:
@@ -112,9 +128,9 @@ def build_gui() -> tuple["tk.Tk", "tk.Canvas", "tk.Label"]:
         bg="white",
         highlightthickness=0,
     )
-    canvas.place(x=0, y=0, width=width, height=height - CANVAS_STATUS_HEIGHT)
-    status = tk.Label(root, text="", bg="white", anchor="w")
-    status.place(x=0, y=height - CANVAS_STATUS_HEIGHT, width=width, height=CANVAS_STATUS_HEIGHT)
+    canvas.place(x=0, y=CANVAS_STATUS_HEIGHT, width=width, height=height - CANVAS_STATUS_HEIGHT)
+    status = tk.Label(root, text="", bg="white", anchor="w", justify="left")
+    status.place(x=0, y=0, width=width, height=CANVAS_STATUS_HEIGHT)
     center_window(root, width, height)
     return root, canvas, status
 
@@ -124,47 +140,47 @@ def render_matrix_on_canvas(canvas: "tk.Canvas", matrix: QRMatrix) -> None:
     canvas_width = int(canvas["width"])
     canvas_height = int(canvas["height"])
     size = matrix.size
-    # Fit QR modules, border, and corner markers tightly within the fixed window.
-    # Required footprint for module size m is:
-    #   QR body      = size * m
-    #   frame pad    = 2 * m on each side
-    #   corner block = 5 * m, extending half outside the frame on each side
-    # So total footprint is roughly (size + 9) * m for m >= 3.
-    module_size = max(1, min(canvas_width // (size + 9), canvas_height // (size + 9)))
+    quiet_modules = QR_QUIET_ZONE_MODULES
+    frame_clearance_modules = QR_FRAME_CLEARANCE_MODULES
+    # Keep the QR large, but preserve a true quiet zone plus extra clearance before the cyan frame.
+    total_modules = size + (quiet_modules + frame_clearance_modules) * 2 + 2
+    module_size = max(1, min(canvas_width // total_modules, canvas_height // total_modules))
     qr_pixels = size * module_size
-    frame_pad = module_size * 2
-    frame_width = max(4, module_size * 2)
-    marker = max(12, module_size * 5)
-    footprint_w = qr_pixels + frame_pad * 2 + marker
-    footprint_h = qr_pixels + frame_pad * 2 + marker
+    quiet_pixels = quiet_modules * module_size
+    frame_gap = max(module_size, frame_clearance_modules * module_size)
+    frame_width = max(QR_FRAME_WIDTH, module_size * 3)
+    marker = max(QR_CORNER_MARKER_SIZE, module_size * 4)
+    framed_pixels = qr_pixels + (quiet_pixels + frame_gap) * 2
+    footprint_w = framed_pixels + marker
+    footprint_h = framed_pixels + marker
     footprint_x = (canvas_width - footprint_w) // 2
     footprint_y = (canvas_height - footprint_h) // 2
-    offset_x = footprint_x + marker // 2 + frame_pad
-    offset_y = footprint_y + marker // 2 + frame_pad
+    qr_x0 = footprint_x + marker // 2 + quiet_pixels + frame_gap
+    qr_y0 = footprint_y + marker // 2 + quiet_pixels + frame_gap
 
     image = tk.PhotoImage(width=canvas_width, height=canvas_height)
     image.put("white", to=(0, 0, canvas_width, canvas_height))
     for row in range(size):
         for col in range(size):
             if matrix.modules[row][col]:
-                x0 = offset_x + col * module_size
-                y0 = offset_y + row * module_size
+                x0 = qr_x0 + col * module_size
+                y0 = qr_y0 + row * module_size
                 x1 = x0 + module_size
                 y1 = y0 + module_size
                 image.put("black", to=(x0, y0, x1, y1))
     canvas.create_image(0, 0, image=image, anchor="nw")
     canvas.create_rectangle(
-        offset_x - frame_pad,
-        offset_y - frame_pad,
-        offset_x + qr_pixels + frame_pad,
-        offset_y + qr_pixels + frame_pad,
+        qr_x0 - quiet_pixels - frame_gap,
+        qr_y0 - quiet_pixels - frame_gap,
+        qr_x0 + qr_pixels + quiet_pixels + frame_gap,
+        qr_y0 + qr_pixels + quiet_pixels + frame_gap,
         outline=QR_FRAME_COLOR,
         width=frame_width,
     )
-    x0 = offset_x - frame_pad
-    y0 = offset_y - frame_pad
-    x1 = offset_x + qr_pixels + frame_pad
-    y1 = offset_y + qr_pixels + frame_pad
+    x0 = qr_x0 - quiet_pixels - frame_gap
+    y0 = qr_y0 - quiet_pixels - frame_gap
+    x1 = qr_x0 + qr_pixels + quiet_pixels + frame_gap
+    y1 = qr_y0 + qr_pixels + quiet_pixels + frame_gap
     for left, top in (
         (x0 - marker // 2, y0 - marker // 2),
         (x1 - marker // 2, y0 - marker // 2),
@@ -195,7 +211,6 @@ class QRGuiPlayer:
         self.canvas = canvas
         self.status = status
         self.page_specs = page_specs
-        self.matrices: list[Optional[QRMatrix]] = [None] * len(page_specs)
         self.current = 0
         root.bind("<space>", self.next_page)
         root.bind("<Right>", self.next_page)
@@ -210,12 +225,13 @@ class QRGuiPlayer:
     def show_page(self, index: int) -> None:
         self.current = index
         spec = self.page_specs[index]
-        if self.matrices[index] is None:
-            self.matrices[index] = build_matrix_for_chunk(spec.payload, spec.version)
-        render_matrix_on_canvas(self.canvas, self.matrices[index])
+        if spec.matrix is None:
+            spec.matrix = build_matrix_for_chunk(spec.payload, spec.version)
+        render_matrix_on_canvas(self.canvas, spec.matrix)
         self.status.config(
             text=(
-                f"Page {index + 1}/{len(self.page_specs)}: {spec.label} | "
+                f"Page {index + 1}/{len(self.page_specs)}\n"
+                f"{spec.label}\n"
                 "Space/Right = next, Backspace/Left/P = previous, R = repeat, Q/Esc = quit"
             )
         )
@@ -307,6 +323,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--data-max-version",
+        type=int,
+        choices=list(VERSION_INFO),
+        default=DEFAULT_DATA_MAX_VERSION,
+        help=(
+            "Maximum QR version to use for DATA pages only (default: %(default)s). "
+            "Lower values increase the page count but improve scan reliability."
+        ),
+    )
+    parser.add_argument(
         "--border",
         type=int,
         default=4,
@@ -320,13 +346,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--session-id",
         default="",
-        help="Optional stable session ID. Defaults to a random UUID.",
+        help="Optional stable session ID. Defaults to a short random 4-byte ID.",
     )
     parser.add_argument(
         "--control-repeats",
         type=int,
-        default=3,
-        help="How many times to repeat START/END/SESSION_END control pages (default: %(default)s).",
+        default=1,
+        help="How many times to repeat control pages (default: %(default)s).",
     )
     return parser
 
@@ -351,6 +377,21 @@ def choose_version(chunk_bytes: int, max_version: int) -> int:
 
 def fail(message: str) -> NoReturn:
     sys.exit(f"[file_2_qr] {message}")
+
+
+def make_session_id() -> str:
+    return secrets.token_hex(4).upper()
+
+
+def normalize_session_id(value: str) -> str:
+    session_id = value.strip()
+    if not session_id:
+        return make_session_id()
+    try:
+        session_id.encode("ascii")
+    except UnicodeEncodeError:
+        fail("Session ID must be ASCII.")
+    return session_id
 
 
 def ensure_ascii_path(path: str) -> str:
@@ -407,6 +448,9 @@ def crc32_hex(data: bytes) -> str:
 
 
 def frame_bytes(frame_type: str, **payload: object) -> bytes:
+    session_id = payload.get("s", "")
+    if not isinstance(session_id, str) or not session_id:
+        fail(f"Frame {frame_type} is missing required session id.")
     frame = {
         "m": PROTOCOL_MAGIC,
         "v": PROTOCOL_VERSION,
@@ -417,14 +461,14 @@ def frame_bytes(frame_type: str, **payload: object) -> bytes:
     return encoded.encode("ascii")
 
 
-def build_data_frames(
+def build_data_chunks(
     session_id: str,
     file_id: str,
     relative_path: str,
     encoded_payload: bytes,
     max_version: int,
-    next_page_id: Callable[[], str],
-) -> list[bytes]:
+    sample_page_id: str,
+) -> list[str]:
     max_bytes = get_max_payload(max_version)
     chunk_size = max_bytes
     while chunk_size > 0:
@@ -435,7 +479,7 @@ def build_data_frames(
                 "data",
                 s=session_id,
                 f=file_id,
-                g=next_page_id(),
+                g=sample_page_id,
                 i=index,
                 n=total,
                 p=relative_path,
@@ -447,7 +491,7 @@ def build_data_frames(
         ]
         oversize = [len(frame) - max_bytes for frame in frames if len(frame) > max_bytes]
         if not oversize:
-            return frames
+            return [chunk.decode("ascii") for chunk in chunks]
         chunk_size -= max(oversize)
     fail(f"Unable to fit framed payload into version {max_version}-L QR codes.")
 
@@ -455,92 +499,190 @@ def build_data_frames(
 def build_transfer_pages(
     files: Sequence[TransferFile],
     max_version: int,
+    data_max_version: int,
     session_id: str,
     control_repeats: int,
 ) -> list[PageSpec]:
     page_specs: list[PageSpec] = []
-    page_index = 0
-
-    def next_page_id() -> str:
-        nonlocal page_index
-        page_index += 1
-        return f"{session_id}-{page_index:06d}"
+    prepared_files: list[PreparedFile] = []
+    sample_page_id = f"{session_id}-999999"
 
     for file_index, item in enumerate(files, start=1):
         file_id = f"{file_index:04d}"
         zip_bytes = zip_single_file(item.source, item.relative_path)
         payload_bytes = base64.b64encode(zip_bytes)
-        data_frames = build_data_frames(
+        data_chunks = build_data_chunks(
             session_id,
             file_id,
             item.relative_path,
             payload_bytes,
-            max_version,
-            next_page_id,
+            data_max_version,
+            sample_page_id,
         )
+        prepared_files.append(
+            PreparedFile(
+                source=item.source,
+                relative_path=item.relative_path,
+                file_id=file_id,
+                file_index=file_index,
+                zip_bytes=zip_bytes,
+                payload_bytes=payload_bytes,
+                data_chunks=data_chunks,
+            )
+        )
+
+    file_page_totals = {
+        prepared.file_id: control_repeats + len(prepared.data_chunks) + control_repeats
+        for prepared in prepared_files
+    }
+    total_pages = control_repeats + sum(file_page_totals.values()) + control_repeats
+    page_index = 0
+
+    def next_page_meta() -> tuple[int, str]:
+        nonlocal page_index
+        page_index += 1
+        return page_index, f"{session_id}-{page_index:06d}"
+
+    for repeat_index in range(control_repeats):
+        session_page_index, session_page_id = next_page_meta()
+        session_start = frame_bytes(
+            "session_start",
+            s=session_id,
+            g=session_page_id,
+            c=len(files),
+            sc=total_pages,
+            si=session_page_index,
+            ri=repeat_index + 1,
+            rc=control_repeats,
+        )
+        session_start_version = choose_version(len(session_start), max_version)
+        page_specs.append(
+            PageSpec(
+                payload=session_start,
+                version=session_start_version,
+                label=(
+                    f"SESSION START (Session ID: {session_id}, Total Files: {len(files)})\n"
+                    f"Session QR: {session_page_index}/{total_pages}"
+                ),
+            )
+        )
+
+    for prepared in prepared_files:
+        file_page_total = file_page_totals[prepared.file_id]
+        file_page_index = 0
         for repeat_index in range(control_repeats):
+            file_page_index += 1
+            session_page_index, session_page_id = next_page_meta()
             start_frame = frame_bytes(
                 "start",
                 s=session_id,
-                f=file_id,
-                g=next_page_id(),
-                p=item.relative_path,
+                f=prepared.file_id,
+                g=session_page_id,
+                p=prepared.relative_path,
                 e="base64",
-                c=len(data_frames),
-                o=item.source.stat().st_size,
-                z=len(zip_bytes),
-                zh=sha256_hex(zip_bytes),
+                c=len(prepared.data_chunks),
+                o=prepared.source.stat().st_size,
+                z=len(prepared.zip_bytes),
+                zh=sha256_hex(prepared.zip_bytes),
+                fi=prepared.file_index,
+                fc=len(files),
+                qi=file_page_index,
+                qc=file_page_total,
+                si=session_page_index,
+                sc=total_pages,
                 ri=repeat_index + 1,
                 rc=control_repeats,
             )
             start_version = choose_version(len(start_frame), max_version)
             if len(start_frame) > get_max_payload(start_version):
-                fail(f"START frame for {item.relative_path} exceeds version {max_version}-L capacity.")
+                fail(f"START frame for {prepared.relative_path} exceeds version {max_version}-L capacity.")
             page_specs.append(
                 PageSpec(
                     payload=start_frame,
                     version=start_version,
-                    label=f"START {item.relative_path} {repeat_index + 1}/{control_repeats}",
+                    label=(
+                        f"FILE START (File: {prepared.relative_path})\n"
+                        f"File: {prepared.file_index}/{len(files)} | QR: {file_page_index}/{file_page_total}"
+                    ),
                 )
             )
-        for chunk_index, data_frame in enumerate(data_frames, start=1):
+        for chunk_index, chunk_text in enumerate(prepared.data_chunks, start=1):
+            file_page_index += 1
+            session_page_index, session_page_id = next_page_meta()
+            data_frame = frame_bytes(
+                "data",
+                s=session_id,
+                f=prepared.file_id,
+                g=session_page_id,
+                i=chunk_index,
+                n=len(prepared.data_chunks),
+                p=prepared.relative_path,
+                e="base64",
+                k=crc32_hex(chunk_text.encode("ascii")),
+                d=chunk_text,
+                fi=prepared.file_index,
+                fc=len(files),
+                qi=file_page_index,
+                qc=file_page_total,
+                si=session_page_index,
+                sc=total_pages,
+            )
             page_specs.append(
                 PageSpec(
                     payload=data_frame,
                     version=choose_version(len(data_frame), max_version),
-                    label=f"DATA {item.relative_path} {chunk_index}/{len(data_frames)}",
+                    label=(
+                        f"FILE DATA (File: {prepared.relative_path})\n"
+                        f"File: {prepared.file_index}/{len(files)} | "
+                        f"Chunk: {chunk_index}/{len(prepared.data_chunks)} | "
+                        f"QR: {file_page_index}/{file_page_total}"
+                    ),
                 )
             )
         for repeat_index in range(control_repeats):
+            file_page_index += 1
+            session_page_index, session_page_id = next_page_meta()
             end_frame = frame_bytes(
                 "end",
                 s=session_id,
-                f=file_id,
-                g=next_page_id(),
-                p=item.relative_path,
+                f=prepared.file_id,
+                g=session_page_id,
+                p=prepared.relative_path,
                 e="base64",
-                c=len(data_frames),
-                ph=sha256_hex(payload_bytes),
-                zh=sha256_hex(zip_bytes),
+                c=len(prepared.data_chunks),
+                ph=sha256_hex(prepared.payload_bytes),
+                zh=sha256_hex(prepared.zip_bytes),
+                fi=prepared.file_index,
+                fc=len(files),
+                qi=file_page_index,
+                qc=file_page_total,
+                si=session_page_index,
+                sc=total_pages,
                 ri=repeat_index + 1,
                 rc=control_repeats,
             )
             end_version = choose_version(len(end_frame), max_version)
             if len(end_frame) > get_max_payload(end_version):
-                fail(f"END frame for {item.relative_path} exceeds version {max_version}-L capacity.")
+                fail(f"END frame for {prepared.relative_path} exceeds version {max_version}-L capacity.")
             page_specs.append(
                 PageSpec(
                     payload=end_frame,
                     version=end_version,
-                    label=f"END {item.relative_path} {repeat_index + 1}/{control_repeats}",
+                    label=(
+                        f"FILE END (File: {prepared.relative_path})\n"
+                        f"File: {prepared.file_index}/{len(files)} | QR: {file_page_index}/{file_page_total}"
+                    ),
                 )
             )
     for repeat_index in range(control_repeats):
+        session_page_index, session_page_id = next_page_meta()
         session_end = frame_bytes(
             "session_end",
             s=session_id,
-            g=next_page_id(),
+            g=session_page_id,
             c=len(files),
+            sc=total_pages,
+            si=session_page_index,
             ri=repeat_index + 1,
             rc=control_repeats,
         )
@@ -549,7 +691,10 @@ def build_transfer_pages(
             PageSpec(
                 payload=session_end,
                 version=session_end_version,
-                label=f"SESSION END {session_id} {repeat_index + 1}/{control_repeats}",
+                label=(
+                    f"SESSION END (Session ID: {session_id}, Total Files: {len(files)})\n"
+                    f"Session QR: {session_page_index}/{total_pages}"
+                ),
             )
         )
     return page_specs
@@ -973,6 +1118,14 @@ def build_matrix_for_chunk(chunk: bytes, version: int) -> QRMatrix:
     return best_matrix
 
 
+def cache_page_specs(page_specs: Sequence[PageSpec], border: int) -> None:
+    for spec in page_specs:
+        if spec.matrix is None:
+            spec.matrix = build_matrix_for_chunk(spec.payload, spec.version)
+        if spec.rendered_console is None:
+            spec.rendered_console = spec.matrix.render(border=border)
+
+
 def clear_screen() -> None:
     if os.name == "nt":
         os.system("cls")
@@ -981,13 +1134,22 @@ def clear_screen() -> None:
 
 
 def wait_for_action() -> str:
-    prompt = "Space=next, P/Backspace=previous, R=repeat, Q=quit..."
+    prompt = "Space/Right=next, Left/P/Backspace=previous, R=repeat, Q=quit..."
     print(prompt, end="", flush=True)
     if os.name == "nt":
         import msvcrt
 
         while True:
             key = msvcrt.getwch()
+            if key in {"\x00", "\xe0"}:
+                ext = msvcrt.getwch()
+                if ext == "M":
+                    print("\r" + " " * len(prompt) + "\r", end="", flush=True)
+                    return "next"
+                if ext == "K":
+                    print("\r" + " " * len(prompt) + "\r", end="", flush=True)
+                    return "previous"
+                continue
             if key == " ":
                 print("\r" + " " * len(prompt) + "\r", end="", flush=True)
                 return "next"
@@ -1009,6 +1171,17 @@ def wait_for_action() -> str:
             tty.setraw(fd)
             while True:
                 key = sys.stdin.read(1)
+                if key == "\x1b":
+                    next1 = sys.stdin.read(1)
+                    if next1 == "[":
+                        next2 = sys.stdin.read(1)
+                        if next2 == "C":
+                            print("\r" + " " * len(prompt) + "\r", end="", flush=True)
+                            return "next"
+                        if next2 == "D":
+                            print("\r" + " " * len(prompt) + "\r", end="", flush=True)
+                            return "previous"
+                    continue
                 if key == " ":
                     print("\r" + " " * len(prompt) + "\r", end="", flush=True)
                     return "next"
@@ -1027,9 +1200,18 @@ def wait_for_action() -> str:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if args.data_max_version > args.version:
+        fail("--data-max-version cannot be greater than --version.")
     files = collect_transfer_files(args.input)
-    session_id = args.session_id or uuid.uuid4().hex[:12]
-    page_specs = build_transfer_pages(files, args.version, session_id, max(1, args.control_repeats))
+    session_id = normalize_session_id(args.session_id)
+    page_specs = build_transfer_pages(
+        files,
+        args.version,
+        args.data_max_version,
+        session_id,
+        max(1, args.control_repeats),
+    )
+    cache_page_specs(page_specs, args.border)
 
     if args.console or tk is None:
         total = len(page_specs)
@@ -1038,11 +1220,11 @@ def main() -> None:
             spec = page_specs[index]
             clear_screen()
             print(
-                f"[file_2_qr] Session {session_id} | Page {index + 1}/{total}: {spec.label} | "
+                f"[file_2_qr] Session {session_id} | Page {index + 1}/{total}\n"
+                f"{spec.label}\n"
                 f"{len(spec.payload)} bytes using version {spec.version}-L"
             )
-            matrix = build_matrix_for_chunk(spec.payload, spec.version)
-            print(matrix.render(border=args.border))
+            print(spec.rendered_console)
             if index == total - 1:
                 break
             action = wait_for_action()

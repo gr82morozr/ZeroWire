@@ -68,11 +68,14 @@ constexpr char NTP_SERVER_SECONDARY[] = "time.nist.gov";
 constexpr uint8_t MOUSE_JITTER_ACTIVE_HOUR_START = 8;
 constexpr uint8_t MOUSE_JITTER_ACTIVE_HOUR_END = 17;
 constexpr uint32_t TIME_SYNC_INTERVAL_MS = 60 * 60 * 1000UL;
+constexpr int16_t INPUT_TOKEN_KEY_LEFT = 0x101;
+constexpr int16_t INPUT_TOKEN_KEY_RIGHT = 0x102;
+constexpr int16_t INPUT_TOKEN_KEY_SPACE = 0x103;
 
 // TODO: set these to your Wi-Fi credentials.
 constexpr char WIFI_SSID[] = "xxxxxxx";
 constexpr char WIFI_PASS[] = "xxxxxxx";
-constexpr char OTA_HOSTNAME[] = "esp32-airtype";
+constexpr char OTA_HOSTNAME[] = "esp32-keyboard";
 
 Adafruit_NeoPixel pixel(PIXEL_COUNT, NEOPIXEL_PIN, NEO_RGB + NEO_KHZ800);
 WiFiServer consoleServer(TCP_CONSOLE_PORT);
@@ -133,7 +136,7 @@ size_t controlFrameLength = 0;
 volatile bool fileEndRequested = false;
 volatile bool fileFinishedAckSent = false;
 #if ENABLE_KEYBOARD
-uint8_t inputBuffer[INPUT_BUFFER_SIZE] = {0};
+int16_t inputBuffer[INPUT_BUFFER_SIZE] = {0};
 size_t inputBufferHead = 0;
 size_t inputBufferTail = 0;
 size_t inputBufferCount = 0;
@@ -154,9 +157,10 @@ static void restoreWifiStationMode();
 static void startOtaLedTask();
 #if ENABLE_KEYBOARD
 static bool keyboardInputCancelled(uint32_t abortGeneration);
-static size_t writeKeyboardChar(char c, uint32_t abortGeneration);
+static size_t writeKeyboardToken(int16_t token, uint32_t abortGeneration);
 static void resetInputBuffer();
 static void startKeyboardInputTask();
+static bool enqueueInputToken(int16_t token);
 #endif
 
 static bool loadWifiCredentialsFromEeprom() {
@@ -822,6 +826,17 @@ static bool handleCompletedControlFrame() {
       return true;
     }
   }
+#if ENABLE_KEYBOARD
+  if (strcmp(controlFrameBuffer, "KEY LEFT") == 0) {
+    return enqueueInputToken(INPUT_TOKEN_KEY_LEFT);
+  }
+  if (strcmp(controlFrameBuffer, "KEY RIGHT") == 0) {
+    return enqueueInputToken(INPUT_TOKEN_KEY_RIGHT);
+  }
+  if (strcmp(controlFrameBuffer, "KEY SPACE") == 0) {
+    return enqueueInputToken(INPUT_TOKEN_KEY_SPACE);
+  }
+#endif
 
   Serial.println("Ignoring invalid console control frame");
   return false;
@@ -925,14 +940,14 @@ static void resetInputBuffer() {
   }
 }
 
-static bool enqueueInputChar(char c) {
+static bool enqueueInputToken(int16_t token) {
   if (inputBufferMutex == nullptr) {
     return false;
   }
   bool queued = false;
   xSemaphoreTake(inputBufferMutex, portMAX_DELAY);
   if (inputBufferCount < INPUT_BUFFER_SIZE) {
-    inputBuffer[inputBufferHead] = static_cast<uint8_t>(c);
+    inputBuffer[inputBufferHead] = token;
     inputBufferHead = (inputBufferHead + 1) % INPUT_BUFFER_SIZE;
     inputBufferCount++;
     queued = true;
@@ -944,14 +959,14 @@ static bool enqueueInputChar(char c) {
   return queued;
 }
 
-static bool dequeueInputChar(char* c) {
+static bool dequeueInputChar(int16_t* c) {
   if (inputBufferMutex == nullptr || c == nullptr) {
     return false;
   }
   bool hasChar = false;
   xSemaphoreTake(inputBufferMutex, portMAX_DELAY);
   if (inputBufferCount > 0) {
-    *c = static_cast<char>(inputBuffer[inputBufferTail]);
+    *c = inputBuffer[inputBufferTail];
     inputBufferTail = (inputBufferTail + 1) % INPUT_BUFFER_SIZE;
     inputBufferCount--;
     hasChar = true;
@@ -1046,7 +1061,7 @@ static void handleTcpConsoleInput(bool buttonDown) {
     char raw = static_cast<char>(consoleClient.read());
     char c = raw == '\r' ? '\n' : raw;
 #if ENABLE_KEYBOARD
-    if (enqueueInputChar(c)) {
+    if (enqueueInputToken(static_cast<unsigned char>(c))) {
       acceptedCharCount++;
       sendConsoleAcceptedAck(false);
       sendConsoleBufferState(false);
@@ -1143,7 +1158,7 @@ static bool keyboardInputCancelled(uint32_t abortGeneration) {
          abortGeneration != inputAbortGeneration;
 }
 
-static size_t writeKeyboardChar(char c, uint32_t abortGeneration) {
+static size_t writeKeyboardToken(int16_t token, uint32_t abortGeneration) {
   if (keyboardInputCancelled(abortGeneration)) {
     keyboard.releaseAll();
     return 0;
@@ -1152,6 +1167,29 @@ static size_t writeKeyboardChar(char c, uint32_t abortGeneration) {
   keyboard.releaseAll();
   taskDelayMs(1);
 
+  if (token == INPUT_TOKEN_KEY_LEFT) {
+    keyboard.press(KEY_LEFT_ARROW);
+    taskDelayMs(SHIFTED_SYMBOL_DELAY_MS);
+    keyboard.releaseAll();
+    taskDelayMs(1);
+    return 1;
+  }
+  if (token == INPUT_TOKEN_KEY_RIGHT) {
+    keyboard.press(KEY_RIGHT_ARROW);
+    taskDelayMs(SHIFTED_SYMBOL_DELAY_MS);
+    keyboard.releaseAll();
+    taskDelayMs(1);
+    return 1;
+  }
+  if (token == INPUT_TOKEN_KEY_SPACE) {
+    size_t written = keyboard.write(' ');
+    taskDelayMs(1);
+    keyboard.releaseAll();
+    taskDelayMs(1);
+    return written;
+  }
+
+  char c = static_cast<char>(token & 0xFF);
   if (c == '#') {
     keyboard.press(KEY_LEFT_SHIFT);
     taskDelayMs(SHIFTED_SYMBOL_DELAY_MS);
@@ -1177,7 +1215,7 @@ static void keyboardInputTask(void* parameter) {
   (void)parameter;
 
   for (;;) {
-    char c = 0;
+    int16_t c = 0;
     uint32_t abortGeneration = inputAbortGeneration;
     if (!keyboardTypingActive || !buttonPressed || !dequeueInputChar(&c)) {
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
@@ -1203,7 +1241,7 @@ static void keyboardInputTask(void* parameter) {
       continue;
     }
 
-    if (writeKeyboardChar(c, abortGeneration) > 0) {
+    if (writeKeyboardToken(c, abortGeneration) > 0) {
       typedCharCount++;
       notifyInputTransferLedTask();
     }
