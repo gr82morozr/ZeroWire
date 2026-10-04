@@ -6,6 +6,32 @@ It supports two main delivery modes:
 - direct TCP-to-keyboard streaming, where a host sends text payloads to the ESP32 and the board types them into the target machine
 - QR session transfer, where a sender shows framed QR pages and a receiver webcam app reconstructs the files while using the ESP32 keyboard to advance, repeat, or navigate pages
 
+## PlatformIO Workspace
+
+Open `ZeroWire.code-workspace` in VS Code and install the recommended PlatformIO IDE extension. Only `esp32-keyboard/` is a PlatformIO project. The workspace includes it as a separate folder for the LOLIN S3 Mini firmware with the Arduino framework.
+
+Edit the firmware's Wi-Fi settings before deploying. In **Terminal > Run Task**, use:
+
+- **PlatformIO: Build ESP32 Keyboard** (also Ctrl+Shift+B)
+- **PlatformIO: Upload ESP32 Keyboard** for USB flashing
+- **PlatformIO: Upload ESP32 Keyboard (OTA)** for wireless updates
+- **PlatformIO: Monitor ESP32 Keyboard** for USB serial output
+
+From a PlatformIO terminal in `esp32-keyboard/`:
+
+```sh
+pio run
+pio run -e esp32-s3-com -t upload
+pio device monitor -b 115200
+pio run -e esp32-s3-ota -t upload
+```
+
+USB is the default environment. If automatic port detection picks the wrong device, append `--upload-port COM5` to the USB upload command (replace `COM5` with your device's port). List ports with `pio device list`.
+
+For OTA, first flash over USB and ensure the board connects to Wi-Fi. The OTA target is `esp32-keyboard.local`; if name resolution fails, append `--upload-port <device-ip>` to the OTA command. Close the serial monitor before USB flashing.
+
+Board and environment settings live in `esp32-keyboard/platformio.ini`. Build output stays in `esp32-keyboard/.pio/`. You can also open `esp32-keyboard/` directly in VS Code.
+
 ## Repository Layout
 
 ### `esp32-keyboard/`
@@ -92,11 +118,10 @@ Build and upload the ESP32 firmware with PlatformIO. The project supports both U
 
 ## Entry Points
 
-- Root PlatformIO config: [platformio.ini](/d:/projects.git/ZeroWire/platformio.ini)
+- Firmware PlatformIO config: [esp32-keyboard/platformio.ini](esp32-keyboard/platformio.ini)
 - ESP32 firmware: [esp32-keyboard/src/main.cpp](/d:/projects.git/ZeroWire/esp32-keyboard/src/main.cpp)
 - QR sender: [python-scripts/f2q.py](/d:/projects.git/ZeroWire/python-scripts/f2q.py)
 - TCP sender: [python-scripts/sender.py](/d:/projects.git/ZeroWire/python-scripts/sender.py)
 - Native QR receiver: [cpp-qrcode-reader/src/main.cpp](/d:/projects.git/ZeroWire/cpp-qrcode-reader/src/main.cpp)
 
 Subfolder READMEs contain more implementation-specific details.
-

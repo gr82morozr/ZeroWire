@@ -88,9 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
       formatter_class=argparse.RawDescriptionHelpFormatter,
       epilog=(
           "Examples:\n"
-          "  python scripts/sender.py scripts/email.txt --host 192.168.1.136\n"
-          "  python scripts/sender.py scripts --host 192.168.1.136\n"
-          "  python scripts/sender.py firmware.bin image.jpg --host 192.168.1.136 --port 9000\n"
+          "  python scripts/sender.py scripts/email.txt --host 192.168.1.139\n"
+          "  python scripts/sender.py scripts --host 192.168.1.139\n"
+          "  python scripts/sender.py firmware.bin image.jpg --host 192.168.1.139 --port 9000\n"
           "  python scripts/sender.py payloads report.pdf --host esp32-airtype.local --rate 80 --burst 16\n"
       ),
   )
@@ -102,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
   )
   parser.add_argument(
       "--host",
-      default="192.168.1.136",
+      default="192.168.1.139",
       help="Receiver hostname or IP (default: %(default)s)",
   )
   parser.add_argument(

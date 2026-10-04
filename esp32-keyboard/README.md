@@ -2,7 +2,7 @@
 
 https://www.oceanlabz.in/getting-started-with-esp32-s3-mini-development-board/
 
-`esp32-airtype` is an Arduino/PlatformIO firmware for the `LOLIN S3 Mini` that:
+`esp32-keyboard` is an Arduino/PlatformIO firmware for the `LOLIN S3 Mini` that:
 
 - exposes itself to a host computer as a USB HID mouse and keyboard
 - joins Wi-Fi as a station
@@ -24,7 +24,7 @@ The implementation lives in [`src/main.cpp`](src/main.cpp) and the host helpers 
   FreeRTOS task. Releasing the button terminates the TCP INPUT session and
   clears queued keyboard data.
 - Mouse wake: every `3` minutes the firmware moves the cursor briefly and returns it.
-- OTA: `ArduinoOTA` starts once Wi-Fi is connected, using hostname `esp32-airtype`.
+- OTA: `ArduinoOTA` starts once Wi-Fi is connected, using hostname `esp32-keyboard`.
 
 ## LED states
 
@@ -55,13 +55,25 @@ Reference image: [`doc/esp32s3-mini.pins.png`](doc/esp32s3-mini.pins.png)
 
 ## Configuration
 
-Before building, update the Wi-Fi constants in [`src/main.cpp`](src/main.cpp):
+The Wi-Fi constants in [`src/main.cpp`](src/main.cpp) seed EEPROM once when migrating to the saved network list:
 
 ```cpp
 constexpr char WIFI_SSID[] = "WIFI_SSID";
 constexpr char WIFI_PASS[] = "xxxxxx";
-constexpr char OTA_HOSTNAME[] = "esp32-airtype";
+constexpr char OTA_HOSTNAME[] = "esp32-keyboard";
 ```
+
+EEPROM holds up to four credential pairs in priority order. On the first boot of this
+firmware, the existing saved pair is retained first and the current `Waverley Guest`
+pair is appended second (identical pairs are not duplicated). Later boots read the
+list without importing the constants again. Connections use only EEPROM entries;
+there is no hardcoded fallback.
+
+Startup scans nearby networks and tries the first saved SSID present in the scan,
+skipping absent networks. Each matching pair gets up to 15 seconds to connect before
+the next match is tried. If none connects, the board waits 5 seconds and scans again.
+Reconnection also scans first. Hidden SSIDs that are not identified by the scan are
+skipped. Successful connections do not overwrite the saved list or its priority.
 
 Other useful firmware constants in the same file:
 
@@ -72,7 +84,7 @@ Other useful firmware constants in the same file:
 
 ## Build And Flash
 
-PlatformIO environments are defined in [`platformio.ini`](platformio.ini):
+Open `../ZeroWire.code-workspace` for the full workspace, or open this folder on its own. USB is the default build/upload environment. PlatformIO environments are defined in [`platformio.ini`](platformio.ini):
 
 - `env:esp32-s3-com`: USB/serial flash
 - `env:esp32-s3-ota`: OTA upload via `espota`
@@ -99,14 +111,14 @@ OTA upload:
 pio run -e esp32-s3-ota -t upload
 ```
 
-The OTA environment currently hard-codes:
+The OTA environment uses the firmware hostname:
 
 ```ini
-upload_port = 192.168.1.136
+upload_port = esp32-keyboard.local
 upload_flags = -p 3232
 ```
 
-Adjust `upload_port` to the board's current IP before using OTA uploads.
+If mDNS resolution fails, append `--upload-port <device-ip>` to the OTA upload command.
 
 ## Host Helpers
 

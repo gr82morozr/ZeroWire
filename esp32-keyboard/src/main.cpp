@@ -22,6 +22,7 @@
 constexpr uint8_t PIXEL_COUNT = 1;
 constexpr uint8_t NEOPIXEL_PIN = 21;
 constexpr uint16_t WIFI_RETRY_INTERVAL_MS = 5000;
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint16_t ALERT_BLINK_INTERVAL_MS = 150;
 constexpr uint8_t BUTTON_PIN = 8;
 constexpr uint8_t PIXEL_BRIGHTNESS = 255;
@@ -57,9 +58,14 @@ constexpr BaseType_t KEYBOARD_TASK_CORE = 1;
 constexpr UBaseType_t KEYBOARD_TASK_PRIORITY = 2;
 constexpr size_t WIFI_SSID_MAX_LEN = 32;
 constexpr size_t WIFI_PASS_MAX_LEN = 64;
-constexpr size_t EEPROM_WIFI_DATA_SIZE =
-    1 + WIFI_SSID_MAX_LEN + 1 + WIFI_PASS_MAX_LEN + 1;
-constexpr uint8_t EEPROM_WIFI_MAGIC = 0xA5;
+constexpr uint8_t MAX_WIFI_NETWORKS = 4;
+struct WifiCredentials {
+  char ssid[WIFI_SSID_MAX_LEN + 1];
+  char pass[WIFI_PASS_MAX_LEN + 1];
+};
+constexpr uint8_t EEPROM_WIFI_LEGACY_MAGIC = 0xA5;
+constexpr uint8_t EEPROM_WIFI_LIST_MAGIC = 0xA6;
+constexpr size_t EEPROM_WIFI_DATA_SIZE = 2 + MAX_WIFI_NETWORKS * sizeof(WifiCredentials);
 constexpr uint8_t OTA_MIN_BLINK_HZ = 1;
 constexpr uint8_t OTA_MAX_BLINK_HZ = 20;
 constexpr char TIMEZONE[] = "AEST-10AEDT,M10.1.0/2,M4.1.0/3";
@@ -72,9 +78,10 @@ constexpr int16_t INPUT_TOKEN_KEY_LEFT = 0x101;
 constexpr int16_t INPUT_TOKEN_KEY_RIGHT = 0x102;
 constexpr int16_t INPUT_TOKEN_KEY_SPACE = 0x103;
 
-// TODO: set these to your Wi-Fi credentials.
-constexpr char WIFI_SSID[] = "xxxxxxx";
-constexpr char WIFI_PASS[] = "xxxxxxx";
+// One-time EEPROM migration seed only; never used directly for connection.
+// Once the list exists, changes here do not modify saved credentials.
+constexpr char WIFI_SSID[] = "Waverley Guest";
+constexpr char WIFI_PASS[] = "";
 constexpr char OTA_HOSTNAME[] = "esp32-keyboard";
 
 Adafruit_NeoPixel pixel(PIXEL_COUNT, NEOPIXEL_PIN, NEO_RGB + NEO_KHZ800);
@@ -116,7 +123,14 @@ bool lastRawButtonPressed = false;
 uint32_t lastButtonRawChangeMs = 0;
 char activeWifiSsid[WIFI_SSID_MAX_LEN + 1] = {0};
 char activeWifiPass[WIFI_PASS_MAX_LEN + 1] = {0};
-bool wifiCredentialsSaved = false;
+WifiCredentials savedWifiNetworks[MAX_WIFI_NETWORKS] = {};
+uint8_t savedWifiCount = 0;
+bool visibleWifiNetworks[MAX_WIFI_NETWORKS] = {};
+uint8_t nextWifiCandidate = 0;
+bool wifiScanRunning = false;
+bool wifiAttemptRunning = false;
+bool wifiWasConnected = false;
+uint32_t nextWifiScanStartedMs = 0;
 volatile bool otaInProgress = false;
 volatile uint8_t otaBlinkFrequencyHz = OTA_MIN_BLINK_HZ;
 bool otaBlinkState = false;
@@ -163,70 +177,104 @@ static void startKeyboardInputTask();
 static bool enqueueInputToken(int16_t token);
 #endif
 
-static bool loadWifiCredentialsFromEeprom() {
-  if (EEPROM.read(0) != EEPROM_WIFI_MAGIC) {
-    return false;
-  }
-
-  char storedSsid[WIFI_SSID_MAX_LEN + 1] = {0};
-  char storedPass[WIFI_PASS_MAX_LEN + 1] = {0};
-
-  for (size_t i = 0; i < WIFI_SSID_MAX_LEN; ++i) {
-    storedSsid[i] = static_cast<char>(EEPROM.read(1 + i));
-  }
-  storedSsid[WIFI_SSID_MAX_LEN] = '\0';
-
-  size_t passOffset = 1 + WIFI_SSID_MAX_LEN + 1;
-  for (size_t i = 0; i < WIFI_PASS_MAX_LEN; ++i) {
-    storedPass[i] = static_cast<char>(EEPROM.read(passOffset + i));
-  }
-  storedPass[WIFI_PASS_MAX_LEN] = '\0';
-
-  storedSsid[WIFI_SSID_MAX_LEN] = '\0';
-  storedPass[WIFI_PASS_MAX_LEN] = '\0';
-
-  if (storedSsid[0] == '\0') {
-    return false;
-  }
-
-  strlcpy(activeWifiSsid, storedSsid, sizeof(activeWifiSsid));
-  strlcpy(activeWifiPass, storedPass, sizeof(activeWifiPass));
-  return true;
+static bool readWifiEntry(size_t offset, WifiCredentials& entry) {
+  EEPROM.get(offset, entry);
+  return entry.ssid[0] != '\0' &&
+         memchr(entry.ssid, '\0', sizeof(entry.ssid)) != nullptr &&
+         memchr(entry.pass, '\0', sizeof(entry.pass)) != nullptr;
 }
 
-static void setFallbackWifiCredentials() {
-  strlcpy(activeWifiSsid, WIFI_SSID, sizeof(activeWifiSsid));
-  strlcpy(activeWifiPass, WIFI_PASS, sizeof(activeWifiPass));
+static void loadWifiList() {
+  if (!EEPROM.begin(EEPROM_WIFI_DATA_SIZE)) {
+    Serial.println("EEPROM unavailable; Wi-Fi disabled (no hardcoded fallback)");
+    return;
+  }
+  if (EEPROM.read(0) == EEPROM_WIFI_LIST_MAGIC) {
+    uint8_t count = EEPROM.read(1);
+    if (count > MAX_WIFI_NETWORKS) {
+      Serial.println("Invalid EEPROM Wi-Fi list; Wi-Fi disabled");
+      return;
+    }
+    for (uint8_t i = 0; i < count; ++i) {
+      WifiCredentials entry = {};
+      if (readWifiEntry(2 + i * sizeof(entry), entry)) {
+        savedWifiNetworks[savedWifiCount++] = entry;
+      }
+    }
+  } else {
+    // Preserve the old single saved network as the first list entry.
+    WifiCredentials legacy = {};
+    if (EEPROM.read(0) == EEPROM_WIFI_LEGACY_MAGIC && readWifiEntry(1, legacy)) {
+      savedWifiNetworks[savedWifiCount++] = legacy;
+    } else if (EEPROM.read(0) != 0xFF) {
+      Serial.println("Unrecognized EEPROM Wi-Fi data; leaving it unchanged");
+      return;
+    }
+    // Add the current credentials once, without duplicating an identical pair.
+    if (savedWifiCount == 0 || strcmp(legacy.ssid, WIFI_SSID) != 0 ||
+        strcmp(legacy.pass, WIFI_PASS) != 0) {
+      WifiCredentials& seed = savedWifiNetworks[savedWifiCount++];
+      strlcpy(seed.ssid, WIFI_SSID, sizeof(seed.ssid));
+      strlcpy(seed.pass, WIFI_PASS, sizeof(seed.pass));
+    }
+    EEPROM.write(0, EEPROM_WIFI_LIST_MAGIC);
+    EEPROM.write(1, savedWifiCount);
+    for (uint8_t i = 0; i < savedWifiCount; ++i) {
+      EEPROM.put(2 + i * sizeof(WifiCredentials), savedWifiNetworks[i]);
+    }
+    if (!EEPROM.commit()) {
+      savedWifiCount = 0;
+      Serial.println("Failed to save Wi-Fi list; Wi-Fi disabled");
+      return;
+    }
+    // Connection candidates must be read back from the saved list.
+    for (uint8_t i = 0; i < savedWifiCount; ++i) {
+      EEPROM.get(2 + i * sizeof(WifiCredentials), savedWifiNetworks[i]);
+    }
+    Serial.println("Migrated Wi-Fi credentials to EEPROM list");
+  }
+  for (uint8_t i = 0; i < savedWifiCount; ++i) {
+    Serial.printf("EEPROM Wi-Fi %u: %s\n", i + 1, savedWifiNetworks[i].ssid);
+  }
 }
 
-static bool saveWifiCredentialsToEeprom(const char* ssid, const char* pass) {
-  EEPROM.write(0, EEPROM_WIFI_MAGIC);
-
-  for (size_t i = 0; i < WIFI_SSID_MAX_LEN; ++i) {
-    uint8_t value = i < strlen(ssid) ? static_cast<uint8_t>(ssid[i]) : 0;
-    EEPROM.write(1 + i, value);
-  }
-  EEPROM.write(1 + WIFI_SSID_MAX_LEN, 0);
-
-  size_t passOffset = 1 + WIFI_SSID_MAX_LEN + 1;
-  for (size_t i = 0; i < WIFI_PASS_MAX_LEN; ++i) {
-    uint8_t value = i < strlen(pass) ? static_cast<uint8_t>(pass[i]) : 0;
-    EEPROM.write(passOffset + i, value);
-  }
-  EEPROM.write(passOffset + WIFI_PASS_MAX_LEN, 0);
-
-  return EEPROM.commit();
+static void startWifiScan() {
+  if (savedWifiCount == 0) return;
+  WiFi.disconnect();
+  WiFi.scanDelete();
+  wifiAttemptRunning = false;
+  nextWifiCandidate = 0;
+  memset(visibleWifiNetworks, 0, sizeof(visibleWifiNetworks));
+  Serial.println("Scanning for saved Wi-Fi networks...");
+  int16_t result = WiFi.scanNetworks(true);
+  wifiScanRunning = result != WIFI_SCAN_FAILED;
+  nextWifiScanStartedMs = millis();
+  if (!wifiScanRunning) Serial.println("Wi-Fi scan failed; will retry");
 }
 
-static void beginWifiConnect() {
-  Serial.printf("Connecting to Wi-Fi SSID: %s\n", activeWifiSsid);
-  WiFi.begin(activeWifiSsid, activeWifiPass);
-  lastWifiAttempt = millis();
+static void tryNextWifiNetwork() {
+  while (nextWifiCandidate < savedWifiCount) {
+    uint8_t index = nextWifiCandidate++;
+    if (!visibleWifiNetworks[index]) {
+      Serial.printf("Skipping absent EEPROM Wi-Fi: %s\n", savedWifiNetworks[index].ssid);
+      continue;
+    }
+    strlcpy(activeWifiSsid, savedWifiNetworks[index].ssid, sizeof(activeWifiSsid));
+    strlcpy(activeWifiPass, savedWifiNetworks[index].pass, sizeof(activeWifiPass));
+    Serial.printf("Connecting to EEPROM Wi-Fi %u: %s\n", index + 1, activeWifiSsid);
+    WiFi.begin(activeWifiSsid, activeWifiPass);
+    lastWifiAttempt = millis();
+    wifiAttemptRunning = true;
+    return;
+  }
+  Serial.println("No remaining matching Wi-Fi networks; will rescan");
+  wifiAttemptRunning = false;
+  nextWifiScanStartedMs = millis();
 }
 
 static void restoreWifiStationMode() {
   WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
+  WiFi.setAutoReconnect(false);
   WiFi.setSleep(false);
 }
 
@@ -260,15 +308,50 @@ static bool getLocalTimeSnapshot(struct tm* localTime, time_t* nowOut) {
 }
 
 static void maintainWifi() {
+  if (savedWifiCount == 0) return;
   if (WiFi.status() == WL_CONNECTED) {
+    if (wifiAttemptRunning) {
+      Serial.printf("Wi-Fi connected after %lu ms (boot %lu ms)\n",
+                    static_cast<unsigned long>(millis() - lastWifiAttempt),
+                    static_cast<unsigned long>(millis()));
+    }
+    wifiAttemptRunning = false;
+    wifiWasConnected = true;
     return;
   }
-  uint32_t now = millis();
-  if (now - lastWifiAttempt >= WIFI_RETRY_INTERVAL_MS) {
-    Serial.println("Wi-Fi not connected, retrying...");
-    WiFi.disconnect();
-    beginWifiConnect();
+  if (wifiWasConnected) {
+    wifiWasConnected = false;
+    startWifiScan();
+    return;
   }
+  if (wifiScanRunning) {
+    int16_t count = WiFi.scanComplete();
+    if (count == WIFI_SCAN_RUNNING) return;
+    wifiScanRunning = false;
+    if (count < 0) {
+      Serial.println("Wi-Fi scan failed; will retry");
+      WiFi.scanDelete();
+      nextWifiScanStartedMs = millis();
+      return;
+    }
+    for (uint8_t i = 0; i < savedWifiCount; ++i) {
+      for (int16_t j = 0; j < count; ++j) {
+        if (WiFi.SSID(j) == savedWifiNetworks[i].ssid) visibleWifiNetworks[i] = true;
+      }
+    }
+    WiFi.scanDelete();
+    tryNextWifiNetwork();
+    return;
+  }
+  if (wifiAttemptRunning) {
+    if (millis() - lastWifiAttempt < WIFI_CONNECT_TIMEOUT_MS) return;
+    Serial.printf("Wi-Fi connection timed out: %s; trying next match\n", activeWifiSsid);
+    WiFi.disconnect();
+    wifiAttemptRunning = false;
+    tryNextWifiNetwork();
+    return;
+  }
+  if (millis() - nextWifiScanStartedMs >= WIFI_RETRY_INTERVAL_MS) startWifiScan();
 }
 
 static void applySolidColor(uint8_t r, uint8_t g, uint8_t b) {
@@ -295,9 +378,6 @@ static void setPowerSaveMode(bool enable) {
     WiFi.setSleep(true);
   } else {
     restoreWifiStationMode();
-    if (WiFi.status() != WL_CONNECTED) {
-      beginWifiConnect();
-    }
   }
   Serial.printf("Power save mode %s\n", enable ? "ENABLED" : "DISABLED");
 }
@@ -503,19 +583,6 @@ static void renderLedMode(LedMode mode) {
   }
 }
 
-static void persistActiveWifiCredentialsIfNeeded() {
-  if (wifiCredentialsSaved || WiFi.status() != WL_CONNECTED) {
-    return;
-  }
-
-  if (saveWifiCredentialsToEeprom(activeWifiSsid, activeWifiPass)) {
-    wifiCredentialsSaved = true;
-    Serial.printf("Saved Wi-Fi credentials to EEPROM for SSID: %s\n",
-                  activeWifiSsid);
-  } else {
-    Serial.println("Failed to save Wi-Fi credentials to EEPROM");
-  }
-}
 
 static void logIpAndMac(const char* prefix) {
   String ip = WiFi.localIP().toString();
@@ -1004,7 +1071,7 @@ static void handleTcpConsoleInput(bool buttonDown) {
     if (consoleClient) {
       closeConsoleClient("disconnected");
     }
-    WiFiClient candidate = consoleServer.available();
+    WiFiClient candidate = consoleServer.accept();
     if (candidate) {
       candidate.setNoDelay(true);
       consoleClient = candidate;
@@ -1346,22 +1413,10 @@ void setup() {
 #if ENABLE_KEYBOARD
   updateKeyboardTypingState(initialPressed);
 #endif
-  if (!EEPROM.begin(EEPROM_WIFI_DATA_SIZE)) {
-    Serial.println("EEPROM init failed, using fallback Wi-Fi credentials");
-    setFallbackWifiCredentials();
-  } else {
-    if (loadWifiCredentialsFromEeprom()) {
-      Serial.printf("Loaded Wi-Fi credentials from EEPROM for SSID: %s\n",
-                    activeWifiSsid);
-      wifiCredentialsSaved = true;
-    } else {
-      Serial.println("No Wi-Fi credentials found in EEPROM, using fallback");
-      setFallbackWifiCredentials();
-    }
-  }
+  loadWifiList();
   restoreWifiStationMode();
   ensureTimeConfigured();
-  beginWifiConnect();
+  startWifiScan();
   ensureOtaConfigured();
 
   consoleServer.begin();
@@ -1411,7 +1466,6 @@ void loop() {
   if (connected && !wasConnected) {
     printIpAddress();
     logIpAndMac("Wi-Fi connected,");
-    persistActiveWifiCredentialsIfNeeded();
   } else if (!connected && wasConnected) {
     Serial.println("Wi-Fi disconnected, entering alert mode.");
     lastIpLog = 0;
@@ -1422,7 +1476,6 @@ void loop() {
   if (connected) {
     ensureTimeConfigured();
     beginOtaIfConnected();
-    persistActiveWifiCredentialsIfNeeded();
     ledMode = determineLedMode(connected, pressedSnapshot, jitterWindowState);
     renderLedMode(ledMode);
     if (millis() - lastIpLog >= 2000) {

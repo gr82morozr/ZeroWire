@@ -1,36 +1,53 @@
 {
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "PlatformIO: Build ESP32 Keyboard",
-      "type": "shell",
-      "command": "pio run",
-      "options": {
-        "cwd": "${workspaceFolder}/esp32-keyboard"
-      },
-      "problemMatcher": ["$platformio"],
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      }
-    },
-    {
-      "label": "PlatformIO: Upload ESP32 Keyboard",
-      "type": "shell",
-      "command": "pio run -e esp32-s3-com -t upload",
-      "options": {
-        "cwd": "${workspaceFolder}/esp32-keyboard"
-      },
-      "problemMatcher": ["$platformio"]
-    },
-    {
-      "label": "PlatformIO: Monitor ESP32 Keyboard",
-      "type": "shell",
-      "command": "pio device monitor -b 115200",
-      "options": {
-        "cwd": "${workspaceFolder}/esp32-keyboard"
-      },
-      "problemMatcher": ["$platformio"]
-    }
-  ]
+    "version":  "2.0.0",
+    "tasks":  [
+                  {
+                      "label":  "PlatformIO: Build ESP32 Keyboard",
+                      "type":  "shell",
+                      "command":  "pio run -e esp32-s3-com",
+                      "options":  {
+                                      "cwd":  "${workspaceFolder}/esp32-keyboard"
+                                  },
+                      "problemMatcher":  [
+                                             "$platformio"
+                                         ],
+                      "group":  {
+                                    "kind":  "build",
+                                    "isDefault":  true
+                                }
+                  },
+                  {
+                      "label":  "PlatformIO: Upload ESP32 Keyboard",
+                      "type":  "shell",
+                      "command":  "pio run -e esp32-s3-com -t upload",
+                      "options":  {
+                                      "cwd":  "${workspaceFolder}/esp32-keyboard"
+                                  },
+                      "problemMatcher":  [
+                                             "$platformio"
+                                         ]
+                  },
+                  {
+                      "label":  "PlatformIO: Monitor ESP32 Keyboard",
+                      "type":  "shell",
+                      "command":  "pio device monitor -b 115200",
+                      "options":  {
+                                      "cwd":  "${workspaceFolder}/esp32-keyboard"
+                                  },
+                      "problemMatcher":  [
+                                             "$platformio"
+                                         ]
+                  },
+                  {
+                      "label":  "PlatformIO: Upload ESP32 Keyboard (OTA)",
+                      "type":  "shell",
+                      "command":  "pio run -e esp32-s3-ota -t upload",
+                      "options":  {
+                                      "cwd":  "${workspaceFolder}/esp32-keyboard"
+                                  },
+                      "problemMatcher":  [
+                                             "$platformio"
+                                         ]
+                  }
+              ]
 }
