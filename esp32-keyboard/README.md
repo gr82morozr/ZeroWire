@@ -24,6 +24,9 @@ The implementation lives in [`src/main.cpp`](src/main.cpp) and the host helpers 
   FreeRTOS task. Releasing the button terminates the TCP INPUT session and
   clears queued keyboard data.
 - Mouse wake: every `3` minutes the firmware moves the cursor briefly and returns it.
+  In jiggler mode, after 2 continuous minutes without Wi-Fi, it jiggles immediately
+  and continues every 3 minutes regardless of the time. Wi-Fi retries continue;
+  reconnecting restores the normal weekday 08:00?17:00 Australia/Sydney schedule.
 - OTA: `ArduinoOTA` starts once Wi-Fi is connected, using hostname `esp32-keyboard`.
 
 ## LED states
@@ -34,7 +37,8 @@ The built-in NeoPixel on GPIO `21` is used as status output:
 - green blink at 10 Hz: INPUT mode data transfer activity
 - breathing rainbow: active mouse jitter mode
 - off: inactive mouse jitter mode outside active hours
-- alternating red/blue blink: Wi-Fi disconnected or time state unknown
+- alternating red/blue blink: Wi-Fi disconnected or time state unknown, unless
+  the 2-minute offline jiggler fallback is active (breathing rainbow)
 - blue/off blink: OTA in progress, with blink rate increasing linearly from
   `OTA_MIN_BLINK_HZ` to `OTA_MAX_BLINK_HZ` as OTA progress increases
 

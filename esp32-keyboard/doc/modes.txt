@@ -18,9 +18,14 @@ Button released: jitter mode
 - Jitter active hours are 08:00 to 17:00, Monday to Friday, using
   Australia/Sydney local time with daylight saving.
 - If local time is not available yet, Wi-Fi stays enabled and the RGB LED blinks
-  red/blue until time sync determines whether jitter mode is active or inactive.
+  red/blue while waiting for time sync or the offline fallback.
+- After 2 continuous minutes without Wi-Fi in jitter mode, send a mouse jiggle
+  immediately and then every 3 minutes regardless of time or active hours.
+- The offline fallback uses the RGB breathing pattern and disables power save.
+- Wi-Fi retries continue. Reconnection restores the normal time-based schedule.
+- INPUT mode clears the fallback; returning to jitter mode starts a new timeout.
 
-Outside jitter active hours:
+Outside jitter active hours (unless offline fallback is active):
 - Wi-Fi stays enabled and connected when possible.
 - The RGB LED is off.
 - No keyboard HID input is sent.

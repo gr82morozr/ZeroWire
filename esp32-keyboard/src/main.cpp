@@ -30,6 +30,7 @@ constexpr uint16_t TCP_CONSOLE_PORT = 9000;
 constexpr uint16_t LOOP_DELAY_CONNECTED_MS = 2;
 constexpr uint16_t LOOP_DELAY_DISCONNECTED_MS = 15;
 constexpr uint16_t LOOP_DELAY_POWERSAVE_MS = 1000;
+constexpr uint32_t JITTER_WIFI_TIMEOUT_MS = 2 * 60 * 1000UL;
 constexpr uint32_t MOUSE_WAKE_INTERVAL_MS = 3 * 60 * 1000;
 constexpr uint8_t INPUT_TRANSFER_BLINK_HZ = 10;
 constexpr uint16_t INPUT_TRANSFER_BLINK_HALF_PERIOD_MS =
@@ -110,6 +111,8 @@ bool otaActive = false;
 uint32_t lastIpLog = 0;
 volatile bool keyboardTypingActive = false;
 uint32_t lastMouseWake = 0;
+uint32_t jitterWifiDisconnectedSince = 0;
+bool jitterWifiTimeoutActive = false;
 uint32_t lastBreathUpdate = 0;
 uint8_t breathHue = 0;
 bool breathInvertColors = false;
@@ -543,6 +546,9 @@ static LedMode determineLedMode(bool connected, bool pressedSnapshot,
                                 JitterWindowState jitterWindowState) {
   if (otaInProgress) {
     return LedMode::OtaBlink;
+  }
+  if (!pressedSnapshot && jitterWifiTimeoutActive) {
+    return LedMode::JitterBreathing;
   }
   if (!pressedSnapshot && jitterWindowState == JitterWindowState::Inactive) {
     return LedMode::Off;
@@ -1417,6 +1423,7 @@ void setup() {
   restoreWifiStationMode();
   ensureTimeConfigured();
   startWifiScan();
+  jitterWifiDisconnectedSince = millis();
   ensureOtaConfigured();
 
   consoleServer.begin();
@@ -1438,18 +1445,30 @@ void loop() {
 #if ENABLE_KEYBOARD
   updateKeyboardTypingState(inputPressed);
 #endif
+  bool connected = WiFi.status() == WL_CONNECTED;
+  uint32_t nowMs = millis();
+  if (inputPressed || connected || stateChanged) {
+    jitterWifiDisconnectedSince = nowMs;
+    jitterWifiTimeoutActive = false;
+  } else if (!jitterWifiTimeoutActive &&
+             nowMs - jitterWifiDisconnectedSince >= JITTER_WIFI_TIMEOUT_MS) {
+    jitterWifiTimeoutActive = true;
+    // Send the first fallback jiggle immediately, then use the normal interval.
+    lastMouseWake = nowMs - MOUSE_WAKE_INTERVAL_MS;
+    Serial.println("Wi-Fi unavailable for 2 minutes; jitter enabled regardless of time");
+  }
   JitterWindowState jitterWindowState = getJitterWindowState();
-  bool mouseJitterWindowActive = jitterWindowState == JitterWindowState::Active;
+  bool mouseJitterWindowActive = jitterWifiTimeoutActive ||
+                                jitterWindowState == JitterWindowState::Active;
   bool mouseJitterPowerSave =
-      !inputPressed && jitterWindowState == JitterWindowState::Inactive &&
+      !inputPressed && !jitterWifiTimeoutActive &&
+      jitterWindowState == JitterWindowState::Inactive &&
       !otaInProgress;
   setPowerSaveMode(mouseJitterPowerSave);
-  bool connected = WiFi.status() == WL_CONNECTED;
   LedMode ledMode = determineLedMode(connected, inputPressed, jitterWindowState);
   if (stateChanged && !inputPressed && ledMode == LedMode::Off) {
     applySolidColor(0, 0, 0);
   }
-  uint32_t nowMs = millis();
   if (!inputPressed && mouseJitterWindowActive &&
       nowMs - lastMouseWake >= MOUSE_WAKE_INTERVAL_MS) {
     performMouseWakeJiggle();
